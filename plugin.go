@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/docker/go-plugins-helpers/volume"
@@ -223,20 +226,46 @@ func (d *nfsDriver) Capabilities() *volume.CapabilitiesResponse {
 	return &volume.CapabilitiesResponse{Capabilities: volume.Capability{Scope: "local"}}
 }
 
-func (d *nfsDriver) mountVolume(v *nfsVolume) error {
+func (d *nfsDriver) mountVolume(v *nfsVolume) (err error) {
+	log.Info().Any("method", "mountVolume").Msgf("Path: %s", v.Path)
+	log.Info().Any("method", "mountVolume").Msgf("Mountpoint: %s", v.Mountpoint)
+	log.Info().Any("method", "mountVolume").Msgf("Mountpoint: %v", v.Options)
+
+	log.Info().Any("method", "mountVolume").Msgf("Creating directory: %s", v.Path)
+	err = os.MkdirAll(v.Path, 0777)
+	if err != nil {
+		return logError("failed to create mountpoint: %v", err)
+	}
+
+	sort.Strings(v.Options)
+	// Construct the export entry to add to /etc/exports
+	exportEntry := fmt.Sprintf("%s %s/24(%s,no_subtree_check,no_root_squash)", v.Path, v.Server, strings.Join(v.Options, ","))
+
+	re := regexp.MustCompile(`,?vers=[34]`)
+	exportEntry = re.ReplaceAllString(exportEntry, "") // Add the export entry to /etc/exports
+	err = d.addExportEntry(exportEntry)
+	if err != nil {
+		return logError("failed to add NFS export entry: %v", err)
+	}
+
+	// Reload NFS exports to apply changes
+	exportfs := exec.Command("exportfs", "-ra")
+	output, err := exportfs.CombinedOutput()
+	if err != nil {
+		return logError("failed to reload NFS exports: %v (%s) [%s]", err, string(output), exportEntry)
+	}
+
+	// Prepare the mount command
 	cmd := exec.Command("mount", "-t", "nfs", fmt.Sprintf("%s:%s", v.Server, v.Path), v.Mountpoint)
 
-	// Append default options like `rw` and `vers=4`
-	//cmd.Args = append(cmd.Args, "-o", "rw,vers=4")
-
-	// Include any additional options specified by the user
-	for _, option := range v.Options {
-		cmd.Args = append(cmd.Args, "-o", option)
+	// Append any additional options for the mount command
+	if len(v.Options) > 0 {
+		cmd.Args = append(cmd.Args, "-o", strings.Join(v.Options, ","))
 	}
 
 	log.Info().Any("method", "mountVolume").Msgf("Mount command: %v", cmd.Args)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return logError("nfs mount command failed: %v (%s)", err, output)
+		return logError("nfs mount command failed: %v (%s) cmd: [%s]", err, output, cmd.String())
 	} else {
 		log.Info().Any("method", "mountVolume").Msg(string(output))
 	}
@@ -249,7 +278,54 @@ func (d *nfsDriver) unmountVolume(target string) error {
 	return exec.Command("sh", "-c", cmd).Run()
 }
 
+func (d *nfsDriver) addExportEntry(entry string) error {
+	// Log start of function execution
+	log.Info().Any("method", "addExportEntry").Msgf("Starting to add NFS export entry %s", entry)
+
+	// Read the current content of /etc/exports
+	data, err := os.ReadFile("/etc/exports")
+	if err != nil {
+		log.Error().Any("method", "addExportEntry").Msgf("Failed to read /etc/exports: %v (%s)", err, entry)
+		return fmt.Errorf("could not read /etc/exports: %w", err)
+	}
+
+	// Check if the entry already exists to avoid duplicates
+	if strings.Contains(string(data), entry) {
+		log.Info().Any("method", "addExportEntry").Msgf("Export entry already exists in /etc/exports (%s)", entry)
+		return nil
+	}
+
+	// Open /etc/exports in append mode for writing the new entry
+	f, err := os.OpenFile("/etc/exports", os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Error().Any("method", "addExportEntry").Msgf("Failed to open /etc/exports for writing: %v (%s)", err, entry)
+		return fmt.Errorf("could not open /etc/exports for writing: %w", err)
+	}
+	defer f.Close()
+
+	// Write the new entry to the file
+	if _, err = f.WriteString(entry + "\n"); err != nil {
+		log.Error().Any("method", "addExportEntry").Msgf("Failed to write to /etc/exports: %v (%s)", err, entry)
+		return fmt.Errorf("could not write to /etc/exports: %w", err)
+	}
+
+	// Confirm the entry has been added
+	log.Info().Any("method", "addExportEntry").Msgf("Successfully added NFS export entry: %s", entry)
+
+	// Read back the file to verify the addition (optional debugging step)
+	updatedData, readErr := os.ReadFile("/etc/exports")
+	if readErr != nil {
+		log.Error().Any("method", "addExportEntry").Msgf("Failed to re-read /etc/exports after writing: %v", readErr)
+	} else if !strings.Contains(string(updatedData), entry) {
+		log.Error().Any("method", "addExportEntry").Msgf("Verification failed: entry not found in /etc/exports after writing (%s)", string(updatedData))
+	} else {
+		log.Info().Any("method", "addExportEntry").Msgf("Verification successful: entry confirmed in /etc/exports (%s)", string(updatedData))
+	}
+
+	return nil
+}
+
 func logError(format string, args ...interface{}) error {
-	log.Info().Any("method", "logError").Msgf(format, args...)
+	log.Error().Any("method", "logError").Msgf(format, args...)
 	return fmt.Errorf(format, args...)
 }
