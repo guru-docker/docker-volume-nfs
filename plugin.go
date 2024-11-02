@@ -227,7 +227,7 @@ func (d *nfsDriver) mountVolume(v *nfsVolume) error {
 	cmd := exec.Command("mount", "-t", "nfs", fmt.Sprintf("%s:%s", v.Server, v.Path), v.Mountpoint)
 
 	// Append default options like `rw` and `vers=4`
-	cmd.Args = append(cmd.Args, "-o", "rw,vers=4")
+	//cmd.Args = append(cmd.Args, "-o", "rw,vers=4")
 
 	// Include any additional options specified by the user
 	for _, option := range v.Options {
