@@ -1,4 +1,4 @@
-PLUGIN_NAME = pavhov/nfs
+PLUGIN_NAME = glabservices/plugin-nfs
 PLUGIN_TAG ?= latest
 
 all: clean rootfs create
