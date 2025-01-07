@@ -16,64 +16,67 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type nfsVolume struct {
-	Server      string
-	Path        string
+type DockerVolume struct {
+	Server string
+	Path   string
+
 	Options     []string
 	Mountpoint  string
 	connections int
 }
 
-type nfsDriver struct {
+type DockerDriver struct {
 	sync.RWMutex
+
 	root      string
 	statePath string
-	volumes   map[string]*nfsVolume
+	volumes   map[string]*DockerVolume
 }
 
-func newNfsDriver(root string) (*nfsDriver, error) {
+func newDockerDriver(root string) (*DockerDriver, error) {
 	log.Info().Any("method", "new driver").Msg(root)
 
-	d := &nfsDriver{
+	d := &DockerDriver{
 		root:      filepath.Join(root, "volumes"),
 		statePath: filepath.Join(root, "state", "nfs-state.json"),
-		volumes:   map[string]*nfsVolume{},
+		volumes:   map[string]*DockerVolume{},
 	}
 
 	data, err := os.ReadFile(d.statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Debug().Any("statePath", d.statePath).Msg("no state found")
+			log.Warn().Any("statePath", d.statePath).Msg("no state found")
 		} else {
-			return nil, err
+			return nil, logError("failed to read state: %w", err)
 		}
 	} else {
-		if err := json.Unmarshal(data, &d.volumes); err != nil {
-			return nil, err
+		if err = json.Unmarshal(data, &d.volumes); err != nil {
+			return nil, logError("failed to unmarshal state: %w", err)
 		}
 	}
 
 	return d, nil
 }
 
-func (d *nfsDriver) saveState() {
+func (d *DockerDriver) saveState() error {
 	data, err := json.Marshal(d.volumes)
 	if err != nil {
-		log.Error().Any("statePath", d.statePath).Msg(err.Error())
-		return
+		return logError("failed to marshal state: %w", err)
 	}
 
-	if err := os.WriteFile(d.statePath, data, 0644); err != nil {
-		log.Error().Any("savestate", d.statePath).Msg(err.Error())
+	if err = os.WriteFile(d.statePath, data, 0644); err != nil {
+		return logError("failed to save state: %w", err)
 	}
+
+	return nil
 }
 
-func (d *nfsDriver) Create(r *volume.CreateRequest) error {
+func (d *DockerDriver) Create(r *volume.CreateRequest) error {
 	log.Info().Any("method", "create").Msgf("%#v", r)
 
 	d.Lock()
 	defer d.Unlock()
-	v := &nfsVolume{}
+	v := &DockerVolume{}
 
 	for key, val := range r.Options {
 		switch key {
@@ -96,12 +99,11 @@ func (d *nfsDriver) Create(r *volume.CreateRequest) error {
 
 	v.Mountpoint = filepath.Join(d.root, fmt.Sprintf("%x", md5.Sum([]byte(v.Server+":"+v.Path))))
 	d.volumes[r.Name] = v
-	d.saveState()
 
-	return nil
+	return d.saveState()
 }
 
-func (d *nfsDriver) Remove(r *volume.RemoveRequest) error {
+func (d *DockerDriver) Remove(r *volume.RemoveRequest) error {
 	log.Info().Any("method", "remove").Msgf("%#v", r)
 
 	d.Lock()
@@ -119,11 +121,11 @@ func (d *nfsDriver) Remove(r *volume.RemoveRequest) error {
 		return logError(err.Error())
 	}
 	delete(d.volumes, r.Name)
-	d.saveState()
-	return nil
+
+	return d.saveState()
 }
 
-func (d *nfsDriver) Path(r *volume.PathRequest) (*volume.PathResponse, error) {
+func (d *DockerDriver) Path(r *volume.PathRequest) (*volume.PathResponse, error) {
 	log.Info().Any("method", "path").Msgf("%#v", r)
 
 	d.RLock()
@@ -137,7 +139,7 @@ func (d *nfsDriver) Path(r *volume.PathRequest) (*volume.PathResponse, error) {
 	return &volume.PathResponse{Mountpoint: v.Mountpoint}, nil
 }
 
-func (d *nfsDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, error) {
+func (d *DockerDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, error) {
 	log.Info().Any("method", "mount").Msgf("%#v", r)
 
 	d.Lock()
@@ -151,7 +153,7 @@ func (d *nfsDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, error)
 	if v.connections == 0 {
 		fi, err := os.Lstat(v.Mountpoint)
 		if os.IsNotExist(err) {
-			if err := os.MkdirAll(v.Mountpoint, 0755); err != nil {
+			if err = os.MkdirAll(v.Mountpoint, 0755); err != nil {
 				return &volume.MountResponse{}, logError(err.Error())
 			}
 		} else if err != nil {
@@ -162,7 +164,7 @@ func (d *nfsDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, error)
 			return &volume.MountResponse{}, logError("%v already exists and it's not a directory", v.Mountpoint)
 		}
 
-		if err := d.mountVolume(v); err != nil {
+		if err = d.mountVolume(v); err != nil {
 			return &volume.MountResponse{}, logError(err.Error())
 		}
 	}
@@ -171,7 +173,7 @@ func (d *nfsDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, error)
 	return &volume.MountResponse{Mountpoint: v.Mountpoint}, nil
 }
 
-func (d *nfsDriver) Unmount(r *volume.UnmountRequest) error {
+func (d *DockerDriver) Unmount(r *volume.UnmountRequest) error {
 	log.Info().Any("method", "unmount").Msgf("%#v", r)
 
 	d.Lock()
@@ -193,7 +195,7 @@ func (d *nfsDriver) Unmount(r *volume.UnmountRequest) error {
 	return nil
 }
 
-func (d *nfsDriver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
+func (d *DockerDriver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
 	log.Info().Any("method", "get").Msgf("%#v", r)
 
 	d.Lock()
@@ -207,7 +209,7 @@ func (d *nfsDriver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
 	return &volume.GetResponse{Volume: &volume.Volume{Name: r.Name, Mountpoint: v.Mountpoint}}, nil
 }
 
-func (d *nfsDriver) List() (*volume.ListResponse, error) {
+func (d *DockerDriver) List() (*volume.ListResponse, error) {
 	log.Info().Any("method", "list").Msg("")
 
 	d.Lock()
@@ -220,18 +222,15 @@ func (d *nfsDriver) List() (*volume.ListResponse, error) {
 	return &volume.ListResponse{Volumes: vols}, nil
 }
 
-func (d *nfsDriver) Capabilities() *volume.CapabilitiesResponse {
+func (d *DockerDriver) Capabilities() *volume.CapabilitiesResponse {
 	log.Info().Any("method", "capabilities").Msg("")
 
 	return &volume.CapabilitiesResponse{Capabilities: volume.Capability{Scope: "local"}}
 }
 
-func (d *nfsDriver) mountVolume(v *nfsVolume) (err error) {
-	log.Info().Any("method", "mountVolume").Msgf("Path: %s", v.Path)
-	log.Info().Any("method", "mountVolume").Msgf("Mountpoint: %s", v.Mountpoint)
-	log.Info().Any("method", "mountVolume").Msgf("Mountpoint: %v", v.Options)
+func (d *DockerDriver) mountVolume(v *DockerVolume) (err error) {
+	log.Info().Any("method", "mountVolume").Msgf("Creating directory: %s", v.Mountpoint)
 
-	log.Info().Any("method", "mountVolume").Msgf("Creating directory: %s", v.Path)
 	err = os.MkdirAll(v.Path, 0777)
 	if err != nil {
 		return logError("failed to create mountpoint: %v", err)
@@ -264,7 +263,7 @@ func (d *nfsDriver) mountVolume(v *nfsVolume) (err error) {
 	}
 
 	log.Info().Any("method", "mountVolume").Msgf("Mount command: %v", cmd.Args)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err = cmd.CombinedOutput(); err != nil {
 		return logError("nfs mount command failed: %v (%s) cmd: [%s]", err, output, cmd.String())
 	} else {
 		log.Info().Any("method", "mountVolume").Msg(string(output))
@@ -272,13 +271,13 @@ func (d *nfsDriver) mountVolume(v *nfsVolume) (err error) {
 	return nil
 }
 
-func (d *nfsDriver) unmountVolume(target string) error {
+func (d *DockerDriver) unmountVolume(target string) error {
 	cmd := fmt.Sprintf("umount %s", target)
 	log.Info().Any("method", "unmountVolume").Msgf("%v", cmd)
 	return exec.Command("sh", "-c", cmd).Run()
 }
 
-func (d *nfsDriver) addExportEntry(entry string) error {
+func (d *DockerDriver) addExportEntry(entry string) error {
 	// Log start of function execution
 	log.Info().Any("method", "addExportEntry").Msgf("Starting to add NFS export entry %s", entry)
 
@@ -286,7 +285,7 @@ func (d *nfsDriver) addExportEntry(entry string) error {
 	data, err := os.ReadFile("/etc/exports")
 	if err != nil {
 		log.Error().Any("method", "addExportEntry").Msgf("Failed to read /etc/exports: %v (%s)", err, entry)
-		return fmt.Errorf("could not read /etc/exports: %w", err)
+		return logError("could not read /etc/exports: %w", err)
 	}
 
 	// Check if the entry already exists to avoid duplicates
@@ -298,15 +297,13 @@ func (d *nfsDriver) addExportEntry(entry string) error {
 	// Open /etc/exports in append mode for writing the new entry
 	f, err := os.OpenFile("/etc/exports", os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Error().Any("method", "addExportEntry").Msgf("Failed to open /etc/exports for writing: %v (%s)", err, entry)
-		return fmt.Errorf("could not open /etc/exports for writing: %w", err)
+		return logError("could not open /etc/exports for writing: %w", err)
 	}
 	defer f.Close()
 
 	// Write the new entry to the file
 	if _, err = f.WriteString(entry + "\n"); err != nil {
-		log.Error().Any("method", "addExportEntry").Msgf("Failed to write to /etc/exports: %v (%s)", err, entry)
-		return fmt.Errorf("could not write to /etc/exports: %w", err)
+		return logError("could not write to /etc/exports: %w", err)
 	}
 
 	// Confirm the entry has been added
@@ -315,9 +312,9 @@ func (d *nfsDriver) addExportEntry(entry string) error {
 	// Read back the file to verify the addition (optional debugging step)
 	updatedData, readErr := os.ReadFile("/etc/exports")
 	if readErr != nil {
-		log.Error().Any("method", "addExportEntry").Msgf("Failed to re-read /etc/exports after writing: %v", readErr)
+		return logError("Failed to re-read /etc/exports after writing: %v", readErr)
 	} else if !strings.Contains(string(updatedData), entry) {
-		log.Error().Any("method", "addExportEntry").Msgf("Verification failed: entry not found in /etc/exports after writing (%s)", string(updatedData))
+		return logError("Verification failed: entry not found in /etc/exports after writing (%s)", string(updatedData))
 	} else {
 		log.Info().Any("method", "addExportEntry").Msgf("Verification successful: entry confirmed in /etc/exports (%s)", string(updatedData))
 	}
