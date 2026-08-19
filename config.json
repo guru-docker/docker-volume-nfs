@@ -22,11 +22,6 @@
   "linux": {
     "capabilities": [
       "CAP_SYS_ADMIN"
-    ],
-    "devices": [
-      {
-        "path": "/dev/fuse"
-      }
     ]
   },
   "mounts": [
@@ -37,18 +32,6 @@
       ],
       "name": "state",
       "source": "/var/lib/docker/plugins/",
-      "settable": [
-        "source"
-      ],
-      "type": "bind"
-    },
-    {
-      "destination": "/root/.ssh",
-      "options": [
-        "rbind"
-      ],
-      "name": "sshkey",
-      "source": "",
       "settable": [
         "source"
       ],
