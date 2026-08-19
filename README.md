@@ -66,13 +66,13 @@ $ docker volume create -d glabservices/plugin-nfs \
 
 ```
 # unit tests and static checks
-$ ./.travis/unit.sh
+$ ./scripts/unit.sh
 
 # build the managed plugin locally
 $ make
 
 # end-to-end tests (needs docker, plugin install rights and a host nfsd)
-$ sudo ./.travis/integration.sh
+$ sudo ./scripts/integration.sh
 ```
 
 `make` targets the local Docker engine by default. Override it with
