@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +30,11 @@ type DockerDriver struct {
 	root      string
 	statePath string
 	volumes   map[string]*DockerVolume
+
+	// mount and unmount indirect through the real mount/umount helpers by
+	// default; tests replace them to exercise the driver without a mount.
+	mount   func(*DockerVolume) error
+	unmount func(string) error
 }
 
 func newDockerDriver(root string) (*DockerDriver, error) {
@@ -41,6 +45,8 @@ func newDockerDriver(root string) (*DockerDriver, error) {
 		statePath: filepath.Join(root, "state", "nfs-state.json"),
 		volumes:   map[string]*DockerVolume{},
 	}
+	d.mount = d.mountVolume
+	d.unmount = d.unmountVolume
 
 	data, err := os.ReadFile(d.statePath)
 	if err != nil {
@@ -118,7 +124,7 @@ func (d *DockerDriver) Remove(r *volume.RemoveRequest) error {
 		return logError("volume %s is currently used by a container", r.Name)
 	}
 	if err := os.RemoveAll(v.Mountpoint); err != nil {
-		return logError(err.Error())
+		return logError("%v", err)
 	}
 	delete(d.volumes, r.Name)
 
@@ -154,18 +160,18 @@ func (d *DockerDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, err
 		fi, err := os.Lstat(v.Mountpoint)
 		if os.IsNotExist(err) {
 			if err = os.MkdirAll(v.Mountpoint, 0755); err != nil {
-				return &volume.MountResponse{}, logError(err.Error())
+				return &volume.MountResponse{}, logError("%v", err)
 			}
 		} else if err != nil {
-			return &volume.MountResponse{}, logError(err.Error())
+			return &volume.MountResponse{}, logError("%v", err)
 		}
 
 		if fi != nil && !fi.IsDir() {
 			return &volume.MountResponse{}, logError("%v already exists and it's not a directory", v.Mountpoint)
 		}
 
-		if err = d.mountVolume(v); err != nil {
-			return &volume.MountResponse{}, logError(err.Error())
+		if err = d.mount(v); err != nil {
+			return &volume.MountResponse{}, logError("%v", err)
 		}
 	}
 
@@ -186,8 +192,8 @@ func (d *DockerDriver) Unmount(r *volume.UnmountRequest) error {
 	v.connections--
 
 	if v.connections <= 0 {
-		if err := d.unmountVolume(v.Mountpoint); err != nil {
-			return logError(err.Error())
+		if err := d.unmount(v.Mountpoint); err != nil {
+			return logError("%v", err)
 		}
 		v.connections = 0
 	}
@@ -228,46 +234,30 @@ func (d *DockerDriver) Capabilities() *volume.CapabilitiesResponse {
 	return &volume.CapabilitiesResponse{Capabilities: volume.Capability{Scope: "local"}}
 }
 
-func (d *DockerDriver) mountVolume(v *DockerVolume) (err error) {
-	log.Info().Any("method", "mountVolume").Msgf("Creating directory: %s", v.Mountpoint)
-
-	err = os.MkdirAll(v.Path, 0777)
-	if err != nil {
-		return logError("failed to create mountpoint: %v", err)
-	}
-
-	sort.Strings(v.Options)
-	// Construct the export entry to add to /etc/exports
-	exportEntry := fmt.Sprintf("%s %s/24(%s,no_subtree_check,no_root_squash)", v.Path, v.Server, strings.Join(v.Options, ","))
-
-	re := regexp.MustCompile(`,?vers=[34]`)
-	exportEntry = re.ReplaceAllString(exportEntry, "") // Add the export entry to /etc/exports
-	err = d.addExportEntry(exportEntry)
-	if err != nil {
-		return logError("failed to add NFS export entry: %v", err)
-	}
-
-	// Reload NFS exports to apply changes
-	exportfs := exec.Command("exportfs", "-ra")
-	output, err := exportfs.CombinedOutput()
-	if err != nil {
-		return logError("failed to reload NFS exports: %v (%s) [%s]", err, string(output), exportEntry)
-	}
-
-	// Prepare the mount command
-	cmd := exec.Command("mount", "-t", "nfs", fmt.Sprintf("%s:%s", v.Server, v.Path), v.Mountpoint)
-
-	// Append any additional options for the mount command
+// nfsMountArgs renders the argument list passed to mount(8) for v, excluding
+// the program name. Options are sorted so the result is stable.
+func nfsMountArgs(v *DockerVolume) []string {
+	args := []string{"-t", "nfs", fmt.Sprintf("%s:%s", v.Server, v.Path), v.Mountpoint}
 	if len(v.Options) > 0 {
-		cmd.Args = append(cmd.Args, "-o", strings.Join(v.Options, ","))
+		opts := append([]string(nil), v.Options...)
+		sort.Strings(opts)
+		args = append(args, "-o", strings.Join(opts, ","))
 	}
+	return args
+}
+
+// mountVolume mounts the remote export at v.Mountpoint. This driver is an NFS
+// client: exporting the share is the server's job, not ours.
+func (d *DockerDriver) mountVolume(v *DockerVolume) error {
+	cmd := exec.Command("mount", nfsMountArgs(v)...)
 
 	log.Info().Any("method", "mountVolume").Msgf("Mount command: %v", cmd.Args)
-	if output, err = cmd.CombinedOutput(); err != nil {
+	output, err := cmd.CombinedOutput()
+	if err != nil {
 		return logError("nfs mount command failed: %v (%s) cmd: [%s]", err, output, cmd.String())
-	} else {
-		log.Info().Any("method", "mountVolume").Msg(string(output))
 	}
+	log.Info().Any("method", "mountVolume").Msg(string(output))
+
 	return nil
 }
 
@@ -275,51 +265,6 @@ func (d *DockerDriver) unmountVolume(target string) error {
 	cmd := fmt.Sprintf("umount %s", target)
 	log.Info().Any("method", "unmountVolume").Msgf("%v", cmd)
 	return exec.Command("sh", "-c", cmd).Run()
-}
-
-func (d *DockerDriver) addExportEntry(entry string) error {
-	// Log start of function execution
-	log.Info().Any("method", "addExportEntry").Msgf("Starting to add NFS export entry %s", entry)
-
-	// Read the current content of /etc/exports
-	data, err := os.ReadFile("/etc/exports")
-	if err != nil {
-		log.Error().Any("method", "addExportEntry").Msgf("Failed to read /etc/exports: %v (%s)", err, entry)
-		return logError("could not read /etc/exports: %w", err)
-	}
-
-	// Check if the entry already exists to avoid duplicates
-	if strings.Contains(string(data), entry) {
-		log.Info().Any("method", "addExportEntry").Msgf("Export entry already exists in /etc/exports (%s)", entry)
-		return nil
-	}
-
-	// Open /etc/exports in append mode for writing the new entry
-	f, err := os.OpenFile("/etc/exports", os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return logError("could not open /etc/exports for writing: %w", err)
-	}
-	defer f.Close()
-
-	// Write the new entry to the file
-	if _, err = f.WriteString(entry + "\n"); err != nil {
-		return logError("could not write to /etc/exports: %w", err)
-	}
-
-	// Confirm the entry has been added
-	log.Info().Any("method", "addExportEntry").Msgf("Successfully added NFS export entry: %s", entry)
-
-	// Read back the file to verify the addition (optional debugging step)
-	updatedData, readErr := os.ReadFile("/etc/exports")
-	if readErr != nil {
-		return logError("Failed to re-read /etc/exports after writing: %v", readErr)
-	} else if !strings.Contains(string(updatedData), entry) {
-		return logError("Verification failed: entry not found in /etc/exports after writing (%s)", string(updatedData))
-	} else {
-		log.Info().Any("method", "addExportEntry").Msgf("Verification successful: entry confirmed in /etc/exports (%s)", string(updatedData))
-	}
-
-	return nil
 }
 
 func logError(format string, args ...interface{}) error {
