@@ -79,6 +79,11 @@ $ sudo ./scripts/integration.sh
 `make DOCKER="docker --context=<name>"` to build against another engine, and
 `PLUGIN_NAME` / `PLUGIN_TAG` to change what is built.
 
+## Known limitations
+
+- The per-volume connection count is not persisted, so after a plugin restart a
+  volume still in use may be reported as free.
+
 ## LICENSE
 
 MIT
