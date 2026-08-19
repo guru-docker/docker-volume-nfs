@@ -66,18 +66,23 @@ $ docker volume create -d glabservices/plugin-nfs \
 
 ```
 # unit tests and static checks
-$ ./.travis/unit.sh
+$ ./scripts/unit.sh
 
 # build the managed plugin locally
 $ make
 
 # end-to-end tests (needs docker, plugin install rights and a host nfsd)
-$ sudo ./.travis/integration.sh
+$ sudo ./scripts/integration.sh
 ```
 
 `make` targets the local Docker engine by default. Override it with
 `make DOCKER="docker --context=<name>"` to build against another engine, and
 `PLUGIN_NAME` / `PLUGIN_TAG` to change what is built.
+
+## Known limitations
+
+- The per-volume connection count is not persisted, so after a plugin restart a
+  volume still in use may be reported as free.
 
 ## LICENSE
 

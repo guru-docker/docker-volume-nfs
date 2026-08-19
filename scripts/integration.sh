@@ -10,7 +10,7 @@
 # host kernel with nfsd available (the server fixture runs --privileged).
 # Point at an existing server instead with NFS_SERVER=... NFS_EXPORT=...
 #
-#   ./.travis/integration.sh
+#   ./scripts/integration.sh
 #
 set -euo pipefail
 
@@ -77,7 +77,7 @@ if [ -n "${NFS_SERVER:-}" ]; then
 	log "using external NFS server $NFS_SERVER:$NFS_EXPORT"
 else
 	log "start NFS server fixture"
-	$DOCKER build -q -t "$NFS_IMAGE" .travis/nfs
+	$DOCKER build -q -t "$NFS_IMAGE" scripts/nfs
 	nfs_cid=$($DOCKER run -d --privileged "$NFS_IMAGE")
 	NFS_SERVER=$($DOCKER inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$nfs_cid")
 	if [ -z "$NFS_SERVER" ]; then
