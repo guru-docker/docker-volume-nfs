@@ -1,89 +1,83 @@
-# Docker volume plugin for sshFS
+# Docker volume plugin for NFS
 
-This plugin allows you to mount remote folder using nfs in your container easily.
+This plugin lets a container mount a remote NFS export as a Docker volume.
 
-[![TravisCI](https://travis-ci.org/guru-docker/docker-volume-nfs.svg)](https://travis-ci.org/guru-docker/docker-volume-nfs)
-[![Go Report Card](https://goreportcard.com/badge/github.com/guru-docker/docker-volume-nfs)](https://goreportcard.com/report/github.com/guru-docker/docker-volume-nfs)
+[![CI](https://github.com/guru-docker/docker-volume-nfs/actions/workflows/ci.yml/badge.svg)](https://github.com/guru-docker/docker-volume-nfs/actions/workflows/ci.yml)
+
+The plugin is an NFS *client*. The export itself must already be published by
+your NFS server; the plugin does not create or manage exports.
 
 ## Usage
-
-### Using a password
 
 1 - Install the plugin
 
 ```
 $ docker plugin install glabservices/plugin-nfs
 
-# or to enable debug 
-docker plugin install glabservices/plugin-nfs DEBUG=1
+# or to enable debug
+$ docker plugin install glabservices/plugin-nfs DEBUG=1
 
 # or to change where plugin state is stored
-docker plugin install glabservices/plugin-nfs state.source=<any_folder>
+$ docker plugin install glabservices/plugin-nfs state.source=<any_folder>
 ```
 
 2 - Create a volume
 
-> Make sure the ***source path on the ssh server was exists***.
-> 
-> Or you'll be failed while use/mount the volume.
+> The export must already exist on the NFS server and be reachable from the
+> Docker host, otherwise mounting the volume fails.
 
 ```
-$ docker volume create -d glabservices/plugin-nfs -o sshcmd=<user@host:path> -o password=<password> [-o port=<port>] [-o <any_sshfs_-o_option> ] sshvolume
-sshvolume
+$ docker volume create -d glabservices/plugin-nfs \
+    -o server=<host_or_ip> \
+    -o path=<export_path> \
+    [-o <any_mount_-o_option>] \
+    nfsvolume
+nfsvolume
+
 $ docker volume ls
-DRIVER              VOLUME NAME
-local               2d75de358a70ba469ac968ee852efd4234b9118b7722ee26a1c5a90dcaea6751
-local               842a765a9bb11e234642c933b3dfc702dee32b73e0cf7305239436a145b89017
-local               9d72c664cbd20512d4e3d5bb9b39ed11e4a632c386447461d48ed84731e44034
-local               be9632386a2d396d438c9707e261f86fd9f5e72a7319417901d84041c8f14a4d
-local               e1496dfe4fa27b39121e4383d1b16a0a7510f0de89f05b336aab3c0deb4dda0e
-glabservices/plugin-nfs         sshvolume
+DRIVER                    VOLUME NAME
+glabservices/plugin-nfs   nfsvolume
 ```
 
 3 - Use the volume
 
 ```
-$ docker run -it -v sshvolume:<path> busybox ls <path>
+$ docker run -it -v nfsvolume:<path> busybox ls <path>
 ```
 
-### Using an ssh key
+## Options
 
-1 - Install the plugin
+| Option   | Required | Description                                            |
+| -------- | -------- | ------------------------------------------------------ |
+| `server` | yes      | NFS server hostname or IP address.                     |
+| `path`   | yes      | Export path on that server, e.g. `/exports/data`.      |
 
-```
-$ docker plugin install glabservices/plugin-nfs sshkey.source=/home/<user>/.ssh/
-
-# or to enable debug 
-docker plugin install glabservices/plugin-nfs DEBUG=1 sshkey.source=/home/<user>/.ssh/
-
-# or to change where plugin state is stored
-docker plugin install glabservices/plugin-nfs state.source=<any_folder> sshkey.source=/home/<user>/.ssh/
-```
-
-2 - Create a volume
-
-> Make sure the ***source path on the ssh server was exists***.
-> 
-> Or you'll be failed while use/mount the volume.
+Any other option is passed through to `mount -o`, so the usual NFS mount
+options work:
 
 ```
-$ docker volume create -d glabservices/plugin-nfs -o sshcmd=<user@host:path> [-o IdentityFile=/root/.ssh/<key>] [-o port=<port>] [-o <any_sshfs_-o_option> ] sshvolume
-sshvolume
-$ docker volume ls
-DRIVER              VOLUME NAME
-local               2d75de358a70ba469ac968ee852efd4234b9118b7722ee26a1c5a90dcaea6751
-local               842a765a9bb11e234642c933b3dfc702dee32b73e0cf7305239436a145b89017
-local               9d72c664cbd20512d4e3d5bb9b39ed11e4a632c386447461d48ed84731e44034
-local               be9632386a2d396d438c9707e261f86fd9f5e72a7319417901d84041c8f14a4d
-local               e1496dfe4fa27b39121e4383d1b16a0a7510f0de89f05b336aab3c0deb4dda0e
-glabservices/plugin-nfs         sshvolume
+$ docker volume create -d glabservices/plugin-nfs \
+    -o server=10.0.0.5 -o path=/exports/data \
+    -o vers=4 -o ro -o soft \
+    nfsvolume
 ```
 
-3 - Use the volume
+## Development
 
 ```
-$ docker run -it -v sshvolume:<path> busybox ls <path>
+# unit tests and static checks
+$ ./.travis/unit.sh
+
+# build the managed plugin locally
+$ make
+
+# end-to-end tests (needs docker, plugin install rights and a host nfsd)
+$ sudo ./.travis/integration.sh
 ```
+
+`make` targets the local Docker engine by default. Override it with
+`make DOCKER="docker --context=<name>"` to build against another engine, and
+`PLUGIN_NAME` / `PLUGIN_TAG` to change what is built.
 
 ## LICENSE
 
